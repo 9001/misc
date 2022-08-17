@@ -120,7 +120,7 @@ def thumbgen(fpi: str, fpo: str) -> tuple[int, str]:
         x.encode("ascii").split(b" ")
         for x in [
             "ffmpeg -y -hide_banner -nostdin -v warning -i",
-            "-map 0:v -map -0:V -c copy",
+            "-map 0:v -map -0:V -vf scale=512:288:force_original_aspect_ratio=decrease,setsar=1:1 -frames:v 1 -metadata:s:v:0 rotate=0 -q:v 8",
         ]
     ]
 
@@ -240,20 +240,24 @@ def main():
         for ext in ["webp", "png", "jpg"]:
             log(yi, f"thumb-ex: {ext} ...")
             fp = name + ext
-            r = thumbex(vid_fp, fp)
-            if not r[0]:
+            rc, err = thumbex(vid_fp, fp)
+            if not rc:
                 have_thumb = True
                 log(yi, "thumb-ex OK")
                 ups.append(fp)
                 break
+            else:
+                log(yi, f"thumb-ex failed; {rc}: {err}")
 
     if not have_thumb:
         log(yi, "thumb-gen ...")
         fp = name + "jpg"
-        r = thumbgen(vid_fp, fp)
-        if not r[0]:
+        rc, err = thumbgen(vid_fp, fp)
+        if not rc:
             ups.append(fp)
             log(yi, "thumb-gen OK")
+        else:
+            log(yi, f"thumbing failed; {rc}: {err}")
 
     dst = f"{RCLONE_REMOTE}:".encode("utf-8")
     cmd = [b"rclone", b"copy", b"--", fsenc(vid_fp), dst]
