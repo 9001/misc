@@ -25,7 +25,7 @@ deps:
   rclone
 
 usage:
-  -mtp x2=t43200,ay,p2,bin/mtag/rag-prep.py
+  -mtp x2=t5,ay,p2,kn,bin/mtag/rag-prep.py
 """
 
 
@@ -183,7 +183,7 @@ def main():
     for fn in os.listdir(fdir):
         if fn.startswith(name):
             fp = os.path.join(fdir, fn)
-            log(yi, f"want to upload {fp}")
+            log(yi, f"found {fp}")
             ups.append(fp)
 
     fmt = md["fmt"]
@@ -228,7 +228,7 @@ def main():
                 log(yi, "split OK")
                 ups.extend([fpv, fpa])
 
-    # faststart-chk:
+    # TODO faststart-chk:
     # ffmpeg -v trace -hide_banner -i some.mp4 2>&1 | awk "/ type:'moov' /{a=NR} / type:'mdat' /{b=NR} END { if (a>b) { print \"ok\" }}"
 
     have_thumb = False
@@ -259,18 +259,54 @@ def main():
         else:
             log(yi, f"thumbing failed; {rc}: {err}")
 
+    # skip stuff that isn't needed by the webplayer
+    exts = "mp4|webm|mkv|flv|opus|ogg|mp3|m4a|aac|webp|jpg|png".split("|")
+    skips = [x for x in ups if x.split(".")[-1].lower() not in exts]
+    ups = [x for x in ups if x not in skips]
+
+    # and give things better filenames
+    ups2 = []  # renamed
+    for fn in ups:
+        fdir, fn2 = os.path.split(os.path.realpath(fn))
+        ext = fn.split(".")[-1]
+        suf = ""
+        if ext in "mp4|webm|mkv|flv".split("|"):
+            yres = md.get("res", "").split("x")[-1]
+            suf = f".{yres}.{md.get('vc')}"
+        fn2 = f"{yi}{suf}.{ext}"
+        ups2.append(fn2)
+        os.rename(fn, os.path.join(fdir, fn2))
+        log(yi, f"post {fn2} = {fn.split('/')[-1]}")
+    ups = ups2
+    for fn in skips:
+        log(yi, f"skip {fn}")
+
+    lst = os.path.join(fdir, "rclone.lst")
+    with open(lst, "w", encoding="utf-8") as f:
+        f.write("\n".join(ups) + "\n")
+
     dst = f"{RCLONE_REMOTE}:".encode("utf-8")
-    cmd = [b"rclone", b"copy", b"--", fsenc(vid_fp), dst]
+    cmd = [
+        b"rclone",
+        b"copy",
+        b"--files-from",
+        lst.encode("utf-8"),
+        fdir.encode("utf-8"),
+    ]
+    cmd += [fsenc(x) for x in ups]
+    cmd += [dst]
 
     t0 = time.time()
     try:
+        log(yi, " ".join([str(x) for x in cmd]))
         sp.check_call(cmd)
     except:
-        print("rclone failed", file=sys.stderr)
+        log(yi, "rclone failed")
         sys.exit(1)
 
-    print(f"{time.time() - t0:.1f} sec")
-    os.unlink(fsenc(vid_fp))
+    log(yi, f"{time.time() - t0:.1f} sec")
+    for fn in ups:
+        os.unlink(fsenc(os.path.join(fdir, fn)))
 
 
 if __name__ == "__main__":
