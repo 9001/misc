@@ -7,6 +7,7 @@ import subprocess as sp
 import sys
 import time
 
+from datetime import datetime
 from typing import Any
 
 try:
@@ -23,6 +24,7 @@ for copyparty
 deps:
   ffmpeg
   rclone
+  mediainfo
 
 usage:
   -mtp x2=t5,ay,p2,kn,bin/mtag/rag-prep.py
@@ -31,6 +33,8 @@ usage:
 
 RCLONE_REMOTE = "notmybox"
 CONDITIONAL_UPLOAD = True
+DRYRUN = False
+DEBOUNCE = 2 if DRYRUN else 10
 
 
 def eprint(*a: Any, **ka: Any) -> None:
@@ -40,7 +44,8 @@ def eprint(*a: Any, **ka: Any) -> None:
 
 def log(yi: str, msg: str) -> None:
     # append to logfile
-    msg = f"[{yi}] [{time.time():.3f}] {msg}"
+    ts = datetime.utcnow().strftime("%Y-%m%d-%H%M%S.%f")[:-3]
+    msg = f"[{yi}] [{ts}] {msg}"
     eprint(msg)
     with open("vlog.txt", "ab") as f:
         f.write(msg.encode("utf-8", "replace") + b"\n")
@@ -73,22 +78,39 @@ def getmime(fp: str) -> str:
 
 
 def fmtconv(fpi: str, fpo: str) -> tuple[int, str]:
-    zs = "ffmpeg -y -hide_banner -nostdin -v warning -i"
+    zi, zo = [
+        x.encode("ascii").split(b" ")
+        for x in [
+            "ffmpeg -y -hide_banner -nostdin -v warning -i",
+            "-map 0 -c copy -movflags +faststart",
+        ]
+    ]
 
-    cmd = zs.encode("ascii").split(b" ")
-    cmd += [fsenc(fpi), b"-c", b"copy", fsenc(fpo)]
+    a, b = os.path.split(fpo)
+    tfpo = os.path.join(a, "mux-" + b)
+    cmd = zi + [fsenc(fpi)] + zo + [fsenc(tfpo)]
 
-    return run(cmd)
+    ret = run(cmd)
+    if not ret[0]:
+        os.rename(tfpo, fpo)
+    else:
+        try:
+            os.unlink(tfpo)
+        except:
+            pass
+
+    return ret
 
 
 def fmtsplit(fpi: str, fpv: str, fpa: str) -> tuple[int, str]:
+    vf = " -movflags +faststart" if fpv.endswith("mp4") else ""
+    af = " -movflags +faststart" if fpa.endswith("m4a") else ""
     zi, zv, za = [
         x.encode("ascii").split(b" ")
         for x in [
             "ffmpeg -y -hide_banner -nostdin -v warning -i",
-            "-map 0:V:0 -c copy"
-            + (" -movflags +faststart" if fpv.endswith("mp4") else ""),
-            "-map 0:a:0 -c copy",
+            "-map 0:V:0 -c copy" + vf,
+            "-map 0:a:0 -c copy" + af,
         ]
     ]
 
@@ -103,7 +125,7 @@ def fmtsplit(fpi: str, fpv: str, fpa: str) -> tuple[int, str]:
 
 
 def thumbex(fpi: str, fpo: str) -> tuple[int, str]:
-    zb = [
+    zi, zo = [
         x.encode("ascii").split(b" ")
         for x in [
             "ffmpeg -y -hide_banner -nostdin -v warning -i",
@@ -111,25 +133,46 @@ def thumbex(fpi: str, fpo: str) -> tuple[int, str]:
         ]
     ]
 
-    cmd = zb[1] + [fsenc(fpi)] + zb[2] + [fsenc(fpo)]
+    cmd = zi + [fsenc(fpi)] + zo + [fsenc(fpo)]
     return run(cmd)
 
 
 def thumbgen(fpi: str, fpo: str) -> tuple[int, str]:
-    zb = [
+    zi, zo = [
         x.encode("ascii").split(b" ")
         for x in [
             "ffmpeg -y -hide_banner -nostdin -v warning -i",
-            "-map 0:v -map -0:V -vf scale=512:288:force_original_aspect_ratio=decrease,setsar=1:1 -frames:v 1 -metadata:s:v:0 rotate=0 -q:v 8",
+            "-map 0:V -vf scale=512:288:force_original_aspect_ratio=decrease,setsar=1:1 -frames:v 1 -metadata:s:v:0 rotate=0 -q:v 8",
         ]
     ]
 
-    cmd = zb[1] + [fsenc(fpi)] + zb[2] + [fsenc(fpo)]
+    cmd = zi + [fsenc(fpi)] + zo + [fsenc(fpo)]
     return run(cmd)
 
 
 def main():
     vid_fp = sys.argv[1]
+
+    fdir = os.path.dirname(os.path.realpath(vid_fp))
+    flag = os.path.join(fdir, ".processed")
+    if os.path.exists(flag):
+        return "already processed"
+
+    # wait until folder idle
+    while True:
+        busy = False
+        for _ in range(DEBOUNCE):
+            time.sleep(1)
+            for f in os.listdir(fdir):
+                if f.endswith(".PARTIAL"):
+                    busy = True
+
+            if busy:
+                break
+
+        if not busy:
+            break
+
     zb = sys.stdin.buffer.read()
     try:
         # prefer metadata from stdin
@@ -152,11 +195,13 @@ def main():
         yi = cmt.split("v=")[1].split("&")[0]
         log(yi, f"id from comment: {vid_fp}")
 
-    if not yi:
-        subdir = vid_fp.split("/")[-2]
-        if re.match(r"^[\w-]{11}$", subdir):
-            yi = subdir
+    subdir = vid_fp.split("/")[-2]
+    if re.match(r"^[\w-]{11}-[0-9]{13}$", subdir):
+        if not yi:
+            yi = subdir[:11]
             log(yi, f"id from subdir: {vid_fp}")
+        with open(flag, "w") as f:
+            f.write("a")
 
     if not yi:
         m = re.search(r"[\[({}]([\w-]{11})[\])}][^\]\[(){}]+$", vid_fp)
@@ -176,6 +221,32 @@ def main():
             log(yi, f"{t}: {vid_fp}")
             return t
 
+    mib = sp.check_output([b"mediainfo", b"--Output=JSON", b"--", fsenc(vid_fp)])
+    mi = json.loads(mib.decode("utf-8", "replace"))
+    mig = next(x for x in mi["media"]["track"] if x["@type"] == "General")
+    miv = next((x for x in mi["media"]["track"] if x["@type"] == "Video"), None)
+    fmt = mig["Format"].lower()
+    log(yi, f"format: {fmt}")
+
+    ext = None
+    need_remux = False
+    if fmt == "matroska":
+        ext = "mkv"
+        need_remux = True
+    elif fmt == "webm":
+        ext = "webm"
+    elif fmt == "mpeg-4":
+        ext = "mp4" if miv else "m4a"
+        need_remux = mig.get("IsStreamable") != "Yes"
+    elif fmt == "flash video":
+        ext = "flv"
+
+    if ext and not vid_fp.lower().endswith("." + ext):
+        fn2 = vid_fp.rsplit(".", 1)[0] + "." + ext
+        os.rename(vid_fp, fn2)
+        log(yi, f"renamed {vid_fp} => {fn2}")
+        vid_fp = fn2
+
     # upload everything with the same basename
     ups = []
     fdir, fname = os.path.split(vid_fp)
@@ -186,14 +257,8 @@ def main():
             log(yi, f"found {fp}")
             ups.append(fp)
 
-    fmt = md["fmt"]
-    if fmt == "matroska":
-        # might be webm, ask libmagic
-        fmt = getmime(vid_fp).split("-")[-1].split("/")[-1]
-
-    log(yi, f"format: {fmt}")
-    if fmt == "matroska":
-        xcode_ok = False
+    if need_remux:
+        remux_ok = False
         for ext in [".mp4", ".webm"]:
             log(yi, f"remuxing to {ext}")
             fp2 = vid_fp + ext
@@ -206,11 +271,11 @@ def main():
                     pass
             if not rc:
                 log(yi, f"remux success; {err}")
-                xcode_ok = True
+                remux_ok = True
                 ups.append(fp2)
                 break
 
-        if not xcode_ok:
+        if not remux_ok:
             vf = "webm" if md.get("vc") == "vp8" else "mp4"
             af = "ogg" if md.get("ac") == "vorbis" else "m4a"
             log(yi, f"splitting v.{vf} a.{af}")
@@ -228,18 +293,15 @@ def main():
                 log(yi, "split OK")
                 ups.extend([fpv, fpa])
 
-    # TODO faststart-chk:
-    # ffmpeg -v trace -hide_banner -i some.mp4 2>&1 | awk "/ type:'moov' /{a=NR} / type:'mdat' /{b=NR} END { if (a>b) { print \"ok\" }}"
-
     have_thumb = False
     for fp in ups:
         if fp.lower().rsplit(".")[-1] in ["jpg", "jpeg", "webp", "png"]:
             have_thumb = True
 
     if not have_thumb:
-        for ext in ["webp", "png", "jpg"]:
+        for ext in [".webp", ".png", ".jpg"]:
             log(yi, f"thumb-ex: {ext} ...")
-            fp = name + ext
+            fp = vid_fp + ext
             rc, err = thumbex(vid_fp, fp)
             if not rc:
                 have_thumb = True
@@ -251,7 +313,7 @@ def main():
 
     if not have_thumb:
         log(yi, "thumb-gen ...")
-        fp = name + "jpg"
+        fp = vid_fp + ".jpg"
         rc, err = thumbgen(vid_fp, fp)
         if not rc:
             ups.append(fp)
@@ -267,7 +329,7 @@ def main():
     # and give things better filenames
     ups2 = []  # renamed
     for fn in ups:
-        fdir, fn2 = os.path.split(os.path.realpath(fn))
+        fn2 = os.path.basename(os.path.realpath(fn))
         ext = fn.split(".")[-1]
         suf = ""
         if ext in "mp4|webm|mkv|flv".split("|"):
@@ -285,7 +347,7 @@ def main():
     with open(lst, "w", encoding="utf-8") as f:
         f.write("\n".join(ups) + "\n")
 
-    dst = f"{RCLONE_REMOTE}:".encode("utf-8")
+    dst = f"{RCLONE_REMOTE}:{yi}/".encode("utf-8")
     cmd = [
         b"rclone",
         b"copy",
@@ -293,20 +355,21 @@ def main():
         lst.encode("utf-8"),
         fdir.encode("utf-8"),
     ]
-    cmd += [fsenc(x) for x in ups]
     cmd += [dst]
 
     t0 = time.time()
     try:
         log(yi, " ".join([str(x) for x in cmd]))
-        sp.check_call(cmd)
+        if not DRYRUN:
+            sp.check_call(cmd)
     except:
         log(yi, "rclone failed")
         sys.exit(1)
 
     log(yi, f"{time.time() - t0:.1f} sec")
     for fn in ups:
-        os.unlink(fsenc(os.path.join(fdir, fn)))
+        if not DRYRUN:
+            os.unlink(fsenc(os.path.join(fdir, fn)))
 
 
 if __name__ == "__main__":
