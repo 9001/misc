@@ -151,7 +151,7 @@ def thumbgen(fpi: str, fpo: str) -> tuple[int, str]:
     return run(cmd)
 
 
-def esdoc_from_ffprobe(yi, md):
+def esdoc_from_ffprobe(yi, md, mig):
     log(yi, "esdoc from ffprobe...")
     md_map = {
         "channel_name": "artist",
@@ -175,9 +175,14 @@ def esdoc_from_ffprobe(yi, md):
         v = md.get(ffk)
         if v:
             try:
-                doc[k] = int(round(v)) if ffk.startswith(".") else v
-            except:
+                doc[k] = int(round(float(v))) if ffk.startswith(".") else v
+            finally:
                 pass
+
+    try:
+        doc["description"] = mig["Description"]
+    except:
+        pass
 
     return doc
 
@@ -268,7 +273,7 @@ def write_esdoc(yi, vid_fp, ups, md, mig):
         log(yi, f"esdoc from infojson failed: {ex}")
 
     if not doc:
-        doc = esdoc_from_ffprobe(yi, md)
+        doc = esdoc_from_ffprobe(yi, md, mig)
 
     os.makedirs("esdocs", exist_ok=True)
     with open(f"esdocs/{yi}.json", "w", encoding="utf-8") as f:
