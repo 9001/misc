@@ -77,12 +77,12 @@ def getmime(fp: str) -> str:
     return so.decode("utf-8", "replace").strip().split(" ")[-1]
 
 
-def fmtconv(fpi: str, fpo: str) -> tuple[int, str]:
+def fmtconv(fpi: str, fpo: str, no_att="") -> tuple[int, str]:
     zi, zo = [
         x.encode("ascii").split(b" ")
         for x in [
             "ffmpeg -y -hide_banner -nostdin -v warning -i",
-            "-map 0 -c copy -movflags +faststart",
+            f"-map 0 {no_att} -c copy -movflags +faststart",
         ]
     ]
 
@@ -102,21 +102,22 @@ def fmtconv(fpi: str, fpo: str) -> tuple[int, str]:
     return ret
 
 
-def fmtsplit(fpi: str, fpv: str, fpa: str) -> tuple[int, str]:
+def fmtsplit(yi, fpi: str, fpv: str, fpa: str) -> tuple[int, str]:
     vf = " -movflags +faststart" if fpv.endswith("mp4") else ""
     af = " -movflags +faststart" if fpa.endswith("m4a") else ""
     zi, zv, za = [
         x.encode("ascii").split(b" ")
         for x in [
             "ffmpeg -y -hide_banner -nostdin -v warning -i",
-            "-map 0:V:0 -c copy" + vf,
-            "-map 0:a:0 -c copy" + af,
+            "-map 0:V:0 -map -0:t -c copy" + vf,
+            "-map 0:a:0 -map -0:t -c copy" + af,
         ]
     ]
 
     ret = (0, "")
     for out_args, out_fp in [(za, fpa), (zv, fpv)]:
         cmd = zi + [fsenc(fpi)] + out_args + [fsenc(out_fp)]
+        # log(yi, str(cmd))
         ret = run(cmd)
         if ret[0]:
             return ret
@@ -148,6 +149,132 @@ def thumbgen(fpi: str, fpo: str) -> tuple[int, str]:
 
     cmd = zi + [fsenc(fpi)] + zo + [fsenc(fpo)]
     return run(cmd)
+
+
+def esdoc_from_ffprobe(yi, md):
+    log(yi, "esdoc from ffprobe...")
+    md_map = {
+        "channel_name": "artist",
+        "title": "title",
+        "upload_date": "date",
+        "description": "description",
+        "duration": ".dur",
+        "width": ".resw",
+        "height": ".resh",
+        "fps": ".fps",
+    }
+
+    uploaded = md.get("date")
+    if uploaded:
+        m = re.search(r"^(....)-?(..)-?(..)", str(uploaded))
+        if m:
+            md["date"] = f"{m[1]}-{m[2]}-{m[3]}"
+
+    doc = {"video_id": yi}
+    for k, ffk in md_map.items():
+        v = md.get(ffk)
+        if v:
+            try:
+                doc[k] = int(round(v)) if ffk.startswith(".") else v
+            except:
+                pass
+
+    return doc
+
+
+def esdoc_from_infojson(yi, vid_fp, ups):
+    log(yi, "esdoc from infojson...")
+    zs = "ffprobe -hide_banner -show_streams -show_format -of json"
+    cmd = zs.encode("ascii").split(b" ") + [fsenc(vid_fp)]
+    so = sp.check_output(cmd)
+    fj = json.loads(so.decode("utf-8", "replace"))
+    p1 = None  # found by filename
+    p2 = None  # found by mimetype
+    # log(yi, vid_fp + "\n" + json.dumps(fj))
+    for st in fj["streams"]:
+        try:
+            if st["tags"]["filename"].lower().endswith(".info.json"):
+                p1 = st["index"]
+                break
+            if st["tags"]["mimetype"].lower() == "application/json":
+                p2 = st["index"]
+        except:
+            pass
+
+    n = p2 if p1 is None else p1
+    if n is None:
+        return {}
+
+    log(yi, f"found infojson at #{p1}, #{p2}")
+    if os.path.exists("i.json"):
+        os.unlink("i.json")
+
+    zi, zo = [
+        x.encode("ascii").split(b" ")
+        for x in [
+            f"ffmpeg -hide_banner -dump_attachment:{n} i.json -i",
+            "-c copy -t 1 -f null -",
+        ]
+    ]
+
+    rc, err = run(zi + [fsenc(vid_fp)] + zo)
+    if rc:
+        raise Exception(f"json extract failed: {err}")
+
+    with open("i.json", "r", encoding="utf-8") as f:
+        infojson = json.load(f)
+
+    uploaded = str(infojson["upload_date"])
+    m = re.search(r"^(....)-?(..)-?(..)", uploaded)
+    if m:
+        uploaded = f"{m[1]}-{m[2]}-{m[3]}"
+
+    # remaining code below stolen from aa.dw
+    files = []
+    for filepath in ups:
+        filename = os.path.basename(filepath)
+        size = os.path.getsize(filepath)
+        files.append({"name": filename, "size": size})
+
+    esdoc = {
+        "video_id": infojson["id"],
+        "channel_name": infojson["uploader"],
+        "channel_id": infojson["channel_id"],
+        "upload_date": uploaded,
+        "title": infojson["title"],
+        "description": infojson["description"],
+        "duration": infojson["duration"],
+        "width": infojson["width"],
+        "height": infojson["height"],
+        "fps": infojson["fps"],
+        "format_id": infojson["format_id"],
+        "view_count": infojson["view_count"],
+        "like_count": infojson.get("like_count", -1),
+        "dislike_count": infojson.get("dislike_count", -1),
+        "files": files,
+        # "drive_base": ROOT_FOLDER_ID,
+        # "archived_timestamp": datetime.datetime.utcnow().isoformat(),
+        # "timestamps": youtube_fetch_timestamps(infojson["id"]),
+    }
+    return esdoc
+
+
+def write_esdoc(yi, vid_fp, ups, md, mig):
+    # if '.info.json"' in json.dumps(mig.get("extra", {})):
+    try:
+        doc = esdoc_from_infojson(yi, vid_fp, ups)
+    except Exception as ex:
+        doc = {}
+        log(yi, f"esdoc from infojson failed: {ex}")
+
+    if not doc:
+        doc = esdoc_from_ffprobe(yi, md)
+
+    os.makedirs("esdocs", exist_ok=True)
+    with open(f"esdocs/{yi}.json", "w", encoding="utf-8") as f:
+        json.dump(doc, f, indent="  ")
+
+    log(yi, "esdoc ok")
 
 
 def main():
@@ -259,29 +386,33 @@ def main():
 
     if need_remux:
         remux_ok = False
-        for ext in [".mp4", ".webm"]:
-            log(yi, f"remuxing to {ext}")
-            fp2 = vid_fp + ext
-            rc, err = fmtconv(vid_fp, fp2)
-            if rc:
-                log(yi, f"remux failed; {rc}: {err}")
-                try:
-                    os.unlink(fp2)
-                except:
-                    pass
-            if not rc:
-                log(yi, f"remux success; {err}")
-                remux_ok = True
-                ups.append(fp2)
+        for no_att in ["", "-map -0:t"]:
+            for ext in [".mp4", ".webm"]:
+                log(yi, f"remuxing to {ext}")
+                fp2 = vid_fp + ext
+                rc, err = fmtconv(vid_fp, fp2, no_att)
+                if rc:
+                    log(yi, f"remux failed; {rc}: {err}")
+                    try:
+                        os.unlink(fp2)
+                    except:
+                        pass
+                if not rc:
+                    log(yi, f"remux success; {err}")
+                    remux_ok = True
+                    ups.append(fp2)
+                    break
+
+            if remux_ok:
                 break
 
         if not remux_ok:
             vf = "webm" if md.get("vc") == "vp8" else "mp4"
-            af = "ogg" if md.get("ac") == "vorbis" else "m4a"
+            af = "ogg" if md.get("ac") in ["vorbis", "opus"] else "m4a"
             log(yi, f"splitting v.{vf} a.{af}")
             fpv = f"{vid_fp}.v.{vf}"
             fpa = f"{vid_fp}.a.{af}"
-            rc, err = fmtsplit(vid_fp, fpv, fpa)
+            rc, err = fmtsplit(yi, vid_fp, fpv, fpa)
             if rc:
                 log(yi, f"split failed! {rc}: {err}")
                 for fp2 in [fpv, fpa]:
@@ -328,20 +459,25 @@ def main():
 
     # and give things better filenames
     ups2 = []  # renamed
-    for fn in ups:
-        fn2 = os.path.basename(os.path.realpath(fn))
-        ext = fn.split(".")[-1]
+    for fp in ups:
+        fn2 = os.path.basename(os.path.realpath(fp))
+        ext = fp.split(".")[-1]
         suf = ""
         if ext in "mp4|webm|mkv|flv".split("|"):
             yres = md.get("res", "").split("x")[-1]
             suf = f".{yres}.{md.get('vc')}"
         fn2 = f"{yi}{suf}.{ext}"
         ups2.append(fn2)
-        os.rename(fn, os.path.join(fdir, fn2))
-        log(yi, f"post {fn2} = {fn.split('/')[-1]}")
+        log(yi, f"post {fn2} = {fp.split('/')[-1]}")
+        fp2 = os.path.join(fdir, fn2)
+        os.rename(fp, fp2)
+        if vid_fp == fp:
+            vid_fp = fp2
     ups = ups2
     for fn in skips:
         log(yi, f"skip {fn}")
+
+    write_esdoc(yi, vid_fp, [os.path.join(fdir, x) for x in ups], md, mig)
 
     lst = os.path.join(fdir, "rclone.lst")
     with open(lst, "w", encoding="utf-8") as f:
