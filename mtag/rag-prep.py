@@ -31,7 +31,7 @@ deps:
   mediainfo
 
 usage:
-  -mtp x2=t5,ay,p2,kn,bin/mtag/rag-prep.py
+  -mtp x2=t5,ay,p2,kn,c0,bin/mtag/rag-prep.py
 """
 
 
@@ -306,7 +306,7 @@ def write_esdoc(yi, vid_fp, ups, md, mig):
 
         doc["import"] = {
             "is_imported": True,  # a
-            "received_at": ts,
+            "received_at": int(ts),
             "received_from": uid,
         }
 
@@ -493,19 +493,30 @@ def main():
             log(yi, f"thumbing failed; {rc}: {err}")
 
     # skip stuff that isn't needed by the webplayer
-    exts = "mp4|webm|mkv|flv|opus|ogg|mp3|m4a|aac|webp|jpg|png".split("|")
-    skips = [x for x in ups if x.split(".")[-1].lower() not in exts]
+    exts = r"\.(mp4|webm|mkv|flv|opus|ogg|mp3|m4a|aac|webp|jpg|png|chat.json)$"
+    ptn = re.compile(exts)
+    skips = [x for x in ups if not ptn.search(x.lower())]
     ups = [x for x in ups if x not in skips]
 
     # and give things better filenames
     ups2 = []  # renamed
     for fp in ups:
         fn2 = os.path.basename(os.path.realpath(fp))
-        ext = fp.split(".")[-1]
+
+        ext = ""
+        for t in ["chat.json"]:
+            if fp.endswith("." + t):
+                ext = t
+                break
+
+        if not ext:
+            ext = fp.split(".")[-1]
+
         suf = ""
         if ext in "mp4|webm|mkv|flv".split("|"):
             yres = md.get("res", "").split("x")[-1]
             suf = f".{yres}.{md.get('vc')}"
+
         fn2 = f"{yi}{suf}.{ext}"
         ups2.append(fn2)
         log(yi, f"post {fn2} = {fp.split('/')[-1]}")
