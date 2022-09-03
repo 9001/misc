@@ -1,8 +1,12 @@
 #!/usr/bin/env python
 
+import base64
+import hashlib
 import json
 import os
+import random
 import re
+import sqlite3
 import subprocess as sp
 import sys
 import time
@@ -274,6 +278,37 @@ def write_esdoc(yi, vid_fp, ups, md, mig):
 
     if not doc:
         doc = esdoc_from_ffprobe(yi, md, mig)
+
+    ip = md.get("up_ip")
+    ts = md.get("up_at")
+    if ip:
+        db = sqlite3.connect("guestbook.db3")
+        t = "select msg from gb where ip = ? order by ts desc"
+        r = db.execute(t, (md["up_ip"],)).fetchone()
+        db.close()
+
+        if r:
+            uid = r[0]
+        else:
+            uid = ip
+            if os.path.exists("salt"):
+                with open("salt", "r") as f:
+                    salt = f.read()
+            else:
+                salt = base64.b64encode(os.urandom(32)).decode("ascii")[:24]
+                with open("salt", "w") as f:
+                    f.write(salt)
+            uid = ip + salt
+            buid = hashlib.sha1(uid.encode("ascii")).digest()
+            uid = "ip:" + base64.b64encode(buid).decode("ascii")[:24]
+
+        log(yi, f"uploader: {ip} = {uid}")
+
+        doc["import"] = {
+            "is_imported": True,  # a
+            "received_at": ts,
+            "received_from": uid,
+        }
 
     os.makedirs("esdocs", exist_ok=True)
     with open(f"esdocs/{yi}.json", "w", encoding="utf-8") as f:
