@@ -310,8 +310,10 @@ def write_esdoc(yi, vid_fp, ups, md, mig):
             "received_from": uid,
         }
 
-    os.makedirs("esdocs", exist_ok=True)
-    with open(f"esdocs/{yi}.json", "w", encoding="utf-8") as f:
+    rd = f"pub/esdocs/v{yi[:1]}"
+    fn = f"{rd}/{yi}-{time.time():.0f}.json"
+    os.makedirs(rd, exist_ok=True)
+    with open(fn, "w", encoding="utf-8") as f:
         json.dump(doc, f, indent="  ")
 
     log(yi, "esdoc ok")
@@ -550,7 +552,10 @@ def main():
         if not DRYRUN:
             sp.check_call(cmd)
     except:
-        log(yi, "rclone failed")
+        scmd = b" ".join(cmd).decode("utf-8", "replace")
+        log(yi, f"rclone failed; command: {scmd}")
+        with open("failed-rclones.sh", "ab+") as f:
+            f.write(b" ".join(cmd) + b"\n")
         sys.exit(1)
 
     log(yi, f"{time.time() - t0:.1f} sec")
