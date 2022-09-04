@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 
 import base64
+import fcntl
 import hashlib
 import json
 import os
-import random
 import re
 import sqlite3
 import subprocess as sp
@@ -29,9 +29,17 @@ deps:
   ffmpeg
   rclone
   mediainfo
+debian:
+  apt install rclone ffmpeg mediainfo python3
 
 usage:
   -mtp x2=t5,ay,p2,kn,c0,bin/mtag/rag-prep.py
+
+complete server setup:
+  apt install sqlite3 nginx vim tmux ranger
+  openssl dhparam -out /etc/ssl/dh4096.pem 4096
+  # root: /etc/nginx /root/.acme.sh /root/acme.sh
+  # home: .config/rclone bin pub up guestbook.db3 run vlog.txt .tmux.conf .bashrc
 """
 
 
@@ -193,7 +201,7 @@ def esdoc_from_ffprobe(yi, md, mig):
 
 def esdoc_from_infojson(yi, vid_fp, ups):
     log(yi, "esdoc from infojson...")
-    zs = "ffprobe -hide_banner -show_streams -show_format -of json"
+    zs = "ffprobe -hide_banner -v warning -show_streams -show_format -of json"
     cmd = zs.encode("ascii").split(b" ") + [fsenc(vid_fp)]
     so = sp.check_output(cmd)
     fj = json.loads(so.decode("utf-8", "replace"))
@@ -221,7 +229,7 @@ def esdoc_from_infojson(yi, vid_fp, ups):
     zi, zo = [
         x.encode("ascii").split(b" ")
         for x in [
-            f"ffmpeg -hide_banner -dump_attachment:{n} i.json -i",
+            f"ffmpeg -hide_banner -nostdin -v warning -dump_attachment:{n} i.json -i",
             "-c copy -t 1 -f null -",
         ]
     ]
@@ -320,6 +328,9 @@ def write_esdoc(yi, vid_fp, ups, md, mig):
 
 
 def main():
+    sp.run(f"renice 19 {os.getpid()}".split())
+    sp.run(f"ionice -n 7 -p {os.getpid()}".split())
+
     vid_fp = sys.argv[1]
 
     fdir = os.path.dirname(os.path.realpath(vid_fp))
@@ -327,7 +338,10 @@ def main():
     if os.path.exists(flag):
         return "already processed"
 
+    zb = sys.stdin.buffer.read()
+
     # wait until folder idle
+    print("rag-prep waiting for directory-idle...")
     while True:
         busy = False
         for _ in range(DEBOUNCE):
@@ -342,7 +356,23 @@ def main():
         if not busy:
             break
 
-    zb = sys.stdin.buffer.read()
+    # ensure max 2 instances running
+    print("rag-prep waiting for lock...")
+    locks = ["/dev/shm/rplk1", "/dev/shm/rplk2"]
+    while True:
+        for lk in locks:
+            lkf = open(lk, "wb")
+            try:
+                fcntl.flock(lkf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except:
+                lkf.close()
+
+        if not lkf.closed:
+            break
+
+        time.sleep(1)
+
     try:
         # prefer metadata from stdin
         zs = zb.decode("utf-8", "replace")
