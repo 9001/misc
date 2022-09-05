@@ -13,6 +13,7 @@ import time
 
 from datetime import datetime
 from typing import Any
+import requests
 
 try:
     from copyparty.util import fsenc
@@ -30,7 +31,7 @@ deps:
   rclone
   mediainfo
 debian:
-  apt install rclone ffmpeg mediainfo python3
+  apt install rclone ffmpeg mediainfo python3 python3-requests
 
 usage:
   -mtp x2=t5,ay,p2,kn,c0,bin/mtag/rag-prep.py
@@ -44,6 +45,7 @@ complete server setup:
 
 
 RCLONE_REMOTE = "notmybox"
+WEBHOOK = "https://discord.com/api/webhooks/1234/base64"
 CONDITIONAL_UPLOAD = True
 DRYRUN = False
 DEBOUNCE = 2 if DRYRUN else 10
@@ -61,6 +63,37 @@ def log(yi: str, msg: str) -> None:
     eprint(msg)
     with open("vlog.txt", "ab") as f:
         f.write(msg.encode("utf-8", "replace") + b"\n")
+
+
+def _wh(yi: str, md: dict[str, str], j: Any) -> None:
+    inf = f'{int(float(md.get(".dur", 0)))}s, {md.get("res", "?")} {md.get("vc", "?")}/{md.get("ac", "?")}'
+    j["fields"] = [
+        {"name": "Uploader", "value": md.get("uploader", "?")},
+        {"name": "Video ID", "value": yi},
+        {"name": "Ch", "value": md.get("artist", "?")},
+        {"name": "Properties", "value": inf},
+        {"name": "infojson", "value": md.get("infoj", "?")},
+    ]
+    for v in j["fields"]:
+        v["inline"] = True
+
+    requests.post(WEBHOOK, json={"embeds": [j]})
+
+
+def wh_ok(yi: str, md: dict[str, str]) -> None:
+    j = {"title": "Upped to GDrive", "color": 0x449900}
+    _wh(yi, md, j)
+
+
+def wh_rclone(yi: str, md: dict[str, str], err: str) -> None:
+    j = {"title": "Rclone failed", "color": 0xFFCC00, "description": err}
+    _wh(yi, md, j)
+
+
+def wh_vidchk(yi: str, md: dict[str, str]) -> None:
+    err = md.get("vidchk", "?")
+    j = {"title": "Quarantined", "color": 0xFF0066, "description": err}
+    _wh(yi, md, j)
 
 
 def errchk(so: bytes, se: bytes, rc: int) -> tuple[int, str]:
@@ -196,50 +229,69 @@ def esdoc_from_ffprobe(yi, md, mig):
     except:
         pass
 
+    md["infoj"] = "synthesized"
     return doc
 
 
-def esdoc_from_infojson(yi, vid_fp, ups):
+def esdoc_from_infojson(yi, md, vid_fp, ups):
     log(yi, "esdoc from infojson...")
-    zs = "ffprobe -hide_banner -v warning -show_streams -show_format -of json"
-    cmd = zs.encode("ascii").split(b" ") + [fsenc(vid_fp)]
-    so = sp.check_output(cmd)
-    fj = json.loads(so.decode("utf-8", "replace"))
-    p1 = None  # found by filename
-    p2 = None  # found by mimetype
-    # log(yi, vid_fp + "\n" + json.dumps(fj))
-    for st in fj["streams"]:
-        try:
-            if st["tags"]["filename"].lower().endswith(".info.json"):
-                p1 = st["index"]
-                break
-            if st["tags"]["mimetype"].lower() == "application/json":
-                p2 = st["index"]
-        except:
-            pass
+    ijfn = None
+    for f in ups:
+        if f.endswith(".info.json"):
+            ijfn = f
 
-    n = p2 if p1 is None else p1
-    if n is None:
-        return {}
+    if ijfn:
+        md["infoj"] = "provided"
+    else:
+        zs = "ffprobe -hide_banner -v warning -show_streams -show_format -of json"
+        cmd = zs.encode("ascii").split(b" ") + [fsenc(vid_fp)]
+        so = sp.check_output(cmd)
+        fj = json.loads(so.decode("utf-8", "replace"))
+        p1 = None  # found by filename
+        p2 = None  # found by mimetype
+        # log(yi, vid_fp + "\n" + json.dumps(fj))
+        for st in fj["streams"]:
+            try:
+                if st["tags"]["filename"].lower().endswith(".info.json"):
+                    p1 = st["index"]
+                    break
+                if st["tags"]["mimetype"].lower() == "application/json":
+                    p2 = st["index"]
+            except:
+                pass
 
-    log(yi, f"found infojson at #{p1}, #{p2}")
-    if os.path.exists("i.json"):
-        os.unlink("i.json")
+        n = p2 if p1 is None else p1
+        if n is None:
+            return {}
 
-    zi, zo = [
-        x.encode("ascii").split(b" ")
-        for x in [
-            f"ffmpeg -hide_banner -nostdin -v warning -dump_attachment:{n} i.json -i",
-            "-c copy -t 1 -f null -",
+        log(yi, f"found infojson at #{p1}, #{p2}")
+
+        ijfn = f"{os.path.dirname(vid_fp)}/{yi}.info.json"
+        ups.append(ijfn)
+
+        zi, zo = [
+            x.encode("ascii").split(b" ")
+            for x in [
+                f"ffmpeg -hide_banner -nostdin -v warning -dump_attachment:{n} i.json -i",
+                "-c copy -t 1 -f null -",
+            ]
         ]
-    ]
 
-    rc, err = run(zi + [fsenc(vid_fp)] + zo)
-    if rc:
-        raise Exception(f"json extract failed: {err}")
+        rc, err = run(zi + [fsenc(vid_fp)] + zo)
+        if rc:
+            raise Exception(f"json extract failed: {err}")
 
-    with open("i.json", "r", encoding="utf-8") as f:
-        infojson = json.load(f)
+        md["infoj"] = "in mkv"
+
+    with open(ijfn, "r", encoding="utf-8") as f:
+        ijtxt = f.read()
+
+    ijtxt = re.sub(r'(?<=[?&])ip=[0-9Aa-f%\.]+(?=[&"])', "ip=2.4.3.4", ijtxt)
+
+    with open(ijfn, "w", encoding="utf-8") as f:
+        f.write(ijtxt)
+
+    infojson = json.loads(ijtxt)
 
     uploaded = str(infojson["upload_date"])
     m = re.search(r"^(....)-?(..)-?(..)", uploaded)
@@ -279,7 +331,7 @@ def esdoc_from_infojson(yi, vid_fp, ups):
 def write_esdoc(yi, vid_fp, ups, md, mig):
     # if '.info.json"' in json.dumps(mig.get("extra", {})):
     try:
-        doc = esdoc_from_infojson(yi, vid_fp, ups)
+        doc = esdoc_from_infojson(yi, md, vid_fp, ups)
     except Exception as ex:
         doc = {}
         log(yi, f"esdoc from infojson failed: {ex}")
@@ -287,29 +339,10 @@ def write_esdoc(yi, vid_fp, ups, md, mig):
     if not doc:
         doc = esdoc_from_ffprobe(yi, md, mig)
 
+    uid = md.get("uploader")
     ip = md.get("up_ip")
     ts = md.get("up_at")
-    if ip:
-        db = sqlite3.connect("guestbook.db3")
-        t = "select msg from gb where ip = ? order by ts desc"
-        r = db.execute(t, (md["up_ip"],)).fetchone()
-        db.close()
-
-        if r:
-            uid = r[0]
-        else:
-            uid = ip
-            if os.path.exists("salt"):
-                with open("salt", "r") as f:
-                    salt = f.read()
-            else:
-                salt = base64.b64encode(os.urandom(32)).decode("ascii")[:24]
-                with open("salt", "w") as f:
-                    f.write(salt)
-            uid = ip + salt
-            buid = hashlib.sha1(uid.encode("ascii")).digest()
-            uid = "ip:" + base64.b64encode(buid).decode("ascii")[:24]
-
+    if uid:
         log(yi, f"uploader: {ip} = {uid}")
 
         doc["import"] = {
@@ -328,6 +361,7 @@ def write_esdoc(yi, vid_fp, ups, md, mig):
 
 
 def main():
+    t0 = time.time()
     sp.run(f"renice 19 {os.getpid()}".split())
     sp.run(f"ionice -n 7 -p {os.getpid()}".split())
 
@@ -342,7 +376,7 @@ def main():
 
     # wait until folder idle
     print("rag-prep waiting for directory-idle...")
-    while True:
+    while time.time() - t0 < 600:
         busy = False
         for _ in range(DEBOUNCE):
             time.sleep(1)
@@ -387,6 +421,30 @@ def main():
         extras = ["comment"]
         md.update({k: v[0] for k, v in b.items() if k in extras})
 
+    ip = md.get("up_ip")
+    if ip:
+        db = sqlite3.connect("guestbook.db3")
+        t = "select msg from gb where ip = ? order by ts desc"
+        r = db.execute(t, (md["up_ip"],)).fetchone()
+        db.close()
+
+        if r:
+            uid = r[0]
+        else:
+            uid = ip
+            if os.path.exists("salt"):
+                with open("salt", "r") as f:
+                    salt = f.read()
+            else:
+                salt = base64.b64encode(os.urandom(32)).decode("ascii")[:24]
+                with open("salt", "w") as f:
+                    f.write(salt)
+            uid = ip + salt
+            buid = hashlib.sha1(uid.encode("ascii")).digest()
+            uid = "ip:" + base64.b64encode(buid).decode("ascii")[:24]
+
+        md["uploader"] = uid
+
     yi = ""
 
     cmt = md.get("comment", "")
@@ -418,6 +476,7 @@ def main():
         if chk != "ok":
             t = f"vidchk failed: {chk}"
             log(yi, f"{t}: {vid_fp}")
+            wh_vidchk(yi, md)
             return t
 
     mib = sp.check_output([b"mediainfo", b"--Output=JSON", b"--", fsenc(vid_fp)])
@@ -525,8 +584,9 @@ def main():
             log(yi, f"thumbing failed; {rc}: {err}")
 
     # skip stuff that isn't needed by the webplayer
-    exts = r"\.(mp4|webm|mkv|flv|opus|ogg|mp3|m4a|aac|webp|jpg|png|chat.json)$"
-    ptn = re.compile(exts)
+    ptn = re.compile(
+        r"\.(mp4|webm|mkv|flv|opus|ogg|mp3|m4a|aac|webp|jpg|png|chat.json|info.json)$"
+    )
     skips = [x for x in ups if not ptn.search(x.lower())]
     ups = [x for x in ups if x not in skips]
 
@@ -536,7 +596,7 @@ def main():
         fn2 = os.path.basename(os.path.realpath(fp))
 
         ext = ""
-        for t in ["chat.json"]:
+        for t in ["chat.json", "info.json"]:
             if fp.endswith("." + t):
                 ext = t
                 break
@@ -576,23 +636,30 @@ def main():
     ]
     cmd += [dst]
 
-    t0 = time.time()
-    try:
-        log(yi, " ".join([str(x) for x in cmd]))
-        if not DRYRUN:
-            sp.check_call(cmd)
-    except:
+    t1 = time.time()
+    log(yi, " ".join([str(x) for x in cmd]))
+    if not DRYRUN:
+        rc, err = run(cmd)
+    else:
+        rc = 0
+        err = ""
+
+    if rc:
         scmd = b" ".join(cmd).decode("utf-8", "replace")
-        log(yi, f"rclone failed; command: {scmd}")
+        log(yi, f"rclone failed; command: {scmd}\n{err}")
         with open("failed-rclones.sh", "ab+") as f:
             f.write(b" ".join(cmd) + b"\n")
+        wh_rclone(yi, md, err)
         sys.exit(1)
 
-    log(yi, f"{time.time() - t0:.1f} sec")
+    t2 = time.time()
+    log(yi, f"{t1 - t0:.1f} + {t2 - t1:.1f} sec")
     for fn in ups:
         if not DRYRUN:
             os.unlink(fsenc(os.path.join(fdir, fn)))
 
+    wh_ok(yi, md)
+
 
 if __name__ == "__main__":
-    print(main())
+    main()
